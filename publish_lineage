@@ -1,0 +1,125 @@
+import requests
+import json
+
+# === GPT-4 Lineage Extraction Setup ===
+
+GPT_API_KEY = "YOUR_AZURE_OPENAI_API_KEY"
+GPT_ENDPOINT = "https://YOUR_OPENAI_RESOURCE_NAME.openai.azure.com/openai/deployments/gpt-4o-mini/chat/completions?api-version=2023-05-15"
+
+def call_gpt4_extract_lineage(sql_code: str) -> dict:
+    """
+    Calls GPT-4 to extract lineage from SQL code and returns parsed JSON output.
+    """
+    headers = {
+        "api-key": GPT_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+    prompt = f"""
+    Extract the column-level lineage from the following SQL procedure.
+    Output a JSON object with keys:
+    - inputs: list of {{"table": str, "columns": [str]}}
+    - outputs: list of {{"table": str, "columns": [str]}}
+    SQL Procedure:
+    {sql_code}
+    """
+
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 1000,
+        "top_p": 1
+    }
+
+    response = requests.post(GPT_ENDPOINT, headers=headers, json=payload)
+    response.raise_for_status()
+
+    content = response.json()
+    # Extract GPT output text
+    gpt_output = content["choices"][0]["message"]["content"]
+    # Parse the JSON part from GPT output (assuming clean JSON response)
+    lineage_json = json.loads(gpt_output)
+    return lineage_json
+
+
+# === Microsoft Purview API Setup ===
+
+PURVIEW_ENDPOINT = "https://YOUR_PURVIEW_ACCOUNT_NAME.purview.azure.com"
+PURVIEW_TOKEN = "YOUR_PURVIEW_OAUTH2_BEARER_TOKEN"
+
+def register_lineage_in_purview(lineage_data: dict):
+    """
+    Registers lineage metadata in Purview using its REST API.
+    This example uses the 'lineage' API to create a lineage mapping.
+    """
+
+    url = f"{PURVIEW_ENDPOINT}/catalog/api/atlas/v2/lineage"
+
+    headers = {
+        "Authorization": f"Bearer {PURVIEW_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    # Transform GPT lineage output into Purview lineage format
+    # NOTE: This is a simplified example. Purview lineage format is complex.
+    # This example assumes a mapping between inputs and outputs with entities and attributes.
+
+    # Build entities list
+    entities = []
+
+    def build_entity(table_name, columns, entity_type):
+        return {
+            "qualifiedName": f"{table_name}::{entity_type}",
+            "typeName": "azure_sql_table",
+            "attributes": {
+                "name": table_name,
+                "columns": columns
+            }
+        }
+
+    # Add input entities
+    for input_tbl in lineage_data.get("inputs", []):
+        entities.append(build_entity(input_tbl["table"], input_tbl["columns"], "input"))
+
+    # Add output entities
+    for output_tbl in lineage_data.get("outputs", []):
+        entities.append(build_entity(output_tbl["table"], output_tbl["columns"], "output"))
+
+    lineage_payload = {
+        "entities": entities,
+        "lineageRelations": [
+            {
+                "fromEntity": {"qualifiedName": input_ent["qualifiedName"]},
+                "toEntity": {"qualifiedName": output_ent["qualifiedName"]}
+            }
+            for input_ent in entities if "input" in input_ent["qualifiedName"]
+            for output_ent in entities if "output" in output_ent["qualifiedName"]
+        ]
+    }
+
+    response = requests.post(url, headers=headers, json=lineage_payload)
+    if response.status_code == 200:
+        print("Lineage successfully registered in Purview.")
+    else:
+        print(f"Failed to register lineage. Status: {response.status_code}, Response: {response.text}")
+
+
+# === Example usage ===
+
+if __name__ == "__main__":
+    sql_procedure = """
+    CREATE PROCEDURE SalesSummary AS
+    BEGIN
+        SELECT CustomerID, SUM(SalesAmount) AS TotalSales
+        INTO SalesReport
+        FROM SalesData
+        GROUP BY CustomerID;
+    END;
+    """
+
+    try:
+        lineage = call_gpt4_extract_lineage(sql_procedure)
+        print("Extracted Lineage:", json.dumps(lineage, indent=2))
+        register_lineage_in_purview(lineage)
+    except Exception as e:
+        print(f"Error occurred: {e}")
